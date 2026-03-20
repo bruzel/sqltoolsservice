@@ -79,8 +79,15 @@ namespace Microsoft.SqlTools.SqlCore.SchemaCompare
 
             try
             {
-                SchemaDifference node = this.FindDifference(this.ComparisonResult.Differences, this.Parameters.DiffEntry)
-                    ?? throw new InvalidOperationException("Schema compare include/exclude node not found.");
+                var index = new Dictionary<DifferenceKey, SchemaDifference>();
+                BuildDifferenceIndex(this.ComparisonResult.Differences, index);
+
+                DifferenceKey lookupKey = GetKeyFromDiffEntry(this.Parameters.DiffEntry);
+                if (!index.TryGetValue(lookupKey, out SchemaDifference node))
+                {
+                    throw new InvalidOperationException("Schema compare include/exclude node not found.");
+                }
+
                 this.Success = this.Parameters.IncludeRequest ? this.ComparisonResult.Include(node) : this.ComparisonResult.Exclude(node);
 
                 if (this.Parameters.IncludeRequest)
@@ -111,47 +118,112 @@ namespace Microsoft.SqlTools.SqlCore.SchemaCompare
             }
         }
 
-        private SchemaDifference FindDifference(IEnumerable<SchemaDifference> differences, DiffEntry diffEntry)
+        private const string NamePartsSeparator = ",";
+
+        private static void BuildDifferenceIndex(IEnumerable<SchemaDifference> differences, Dictionary<DifferenceKey, SchemaDifference> index)
         {
             foreach (var difference in differences)
             {
-                if (IsEqual(difference, diffEntry))
+                var key = GetKeyFromDifference(difference);
+                if (!index.ContainsKey(key))
                 {
-                    return difference;
+                    index.Add(key, difference);
                 }
-                else
-                {
-                    var childDiff = FindDifference(difference.Children, diffEntry);
-                    if (childDiff != null)
-                    {
-                        return childDiff;
-                    }
-                }
+                BuildDifferenceIndex(difference.Children, index);
             }
-            return null;
         }
 
-        private bool IsEqual(SchemaDifference difference, DiffEntry diffEntry)
+        private static DifferenceKey GetKeyFromDifference(SchemaDifference difference)
         {
-            bool result = true;
-            DiffEntry entryFromDifference = SchemaCompareUtils.CreateDiffEntry(difference, null, schemaComparisonResult: this.ComparisonResult);
-
-            System.Reflection.PropertyInfo[] properties = diffEntry.GetType().GetProperties();
-            foreach (var prop in properties)
+            string sourceObjectType = null;
+            string sourceValue = string.Empty;
+            if (difference.SourceObject != null)
             {
-                if (prop.Name != "Included")
-                {
-                    var diffVal = prop.GetValue(diffEntry);
-                    var entryVal = prop.GetValue(entryFromDifference);
-                    if (!((diffVal == null && entryVal == null) ||
-                        (diffVal != null && entryVal != null && diffVal.ToString().Equals(entryVal.ToString()))))
-                    {
-                        return false;
-                    }
-                }
+                sourceObjectType = new SchemaComparisonExcludedObjectId(difference.SourceObject.ObjectType, difference.SourceObject.Name).TypeName;
+                sourceValue = string.Join(NamePartsSeparator, difference.SourceObject.Name.Parts);
             }
 
-            return result;
+            string targetObjectType = null;
+            string targetValue = string.Empty;
+            if (difference.TargetObject != null)
+            {
+                targetObjectType = new SchemaComparisonExcludedObjectId(difference.TargetObject.ObjectType, difference.TargetObject.Name).TypeName;
+                targetValue = string.Join(NamePartsSeparator, difference.TargetObject.Name.Parts);
+            }
+
+            return new DifferenceKey(
+                difference.Name,
+                difference.UpdateAction,
+                difference.DifferenceType,
+                sourceObjectType,
+                sourceValue,
+                targetObjectType,
+                targetValue);
+        }
+
+        private static DifferenceKey GetKeyFromDiffEntry(DiffEntry diffEntry)
+        {
+            string sourceValue = diffEntry.SourceValue != null ? string.Join(NamePartsSeparator, diffEntry.SourceValue) : string.Empty;
+            string targetValue = diffEntry.TargetValue != null ? string.Join(NamePartsSeparator, diffEntry.TargetValue) : string.Empty;
+
+            return new DifferenceKey(
+                diffEntry.Name,
+                diffEntry.UpdateAction,
+                diffEntry.DifferenceType,
+                diffEntry.SourceObjectType,
+                sourceValue,
+                diffEntry.TargetObjectType,
+                targetValue);
+        }
+
+        private readonly struct DifferenceKey : IEquatable<DifferenceKey>
+        {
+            public readonly string Name;
+            public readonly SchemaUpdateAction UpdateAction;
+            public readonly SchemaDifferenceType DifferenceType;
+            public readonly string SourceObjectType;
+            public readonly string SourceValue;
+            public readonly string TargetObjectType;
+            public readonly string TargetValue;
+
+            public DifferenceKey(string name, SchemaUpdateAction updateAction, SchemaDifferenceType differenceType,
+                string sourceObjectType, string sourceValue, string targetObjectType, string targetValue)
+            {
+                Name = name;
+                UpdateAction = updateAction;
+                DifferenceType = differenceType;
+                SourceObjectType = sourceObjectType;
+                SourceValue = sourceValue;
+                TargetObjectType = targetObjectType;
+                TargetValue = targetValue;
+            }
+
+            public bool Equals(DifferenceKey other) =>
+                string.Equals(Name, other.Name, StringComparison.Ordinal) &&
+                UpdateAction == other.UpdateAction &&
+                DifferenceType == other.DifferenceType &&
+                string.Equals(SourceObjectType, other.SourceObjectType, StringComparison.Ordinal) &&
+                string.Equals(SourceValue, other.SourceValue, StringComparison.Ordinal) &&
+                string.Equals(TargetObjectType, other.TargetObjectType, StringComparison.Ordinal) &&
+                string.Equals(TargetValue, other.TargetValue, StringComparison.Ordinal);
+
+            public override bool Equals(object obj) => obj is DifferenceKey other && Equals(other);
+
+            public override int GetHashCode()
+            {
+                unchecked
+                {
+                    int hash = 17;
+                    hash = hash * 31 + (Name != null ? StringComparer.Ordinal.GetHashCode(Name) : 0);
+                    hash = hash * 31 + UpdateAction.GetHashCode();
+                    hash = hash * 31 + DifferenceType.GetHashCode();
+                    hash = hash * 31 + (SourceObjectType != null ? StringComparer.Ordinal.GetHashCode(SourceObjectType) : 0);
+                    hash = hash * 31 + (SourceValue != null ? StringComparer.Ordinal.GetHashCode(SourceValue) : 0);
+                    hash = hash * 31 + (TargetObjectType != null ? StringComparer.Ordinal.GetHashCode(TargetObjectType) : 0);
+                    hash = hash * 31 + (TargetValue != null ? StringComparer.Ordinal.GetHashCode(TargetValue) : 0);
+                    return hash;
+                }
+            }
         }
 
         /// <summary>
